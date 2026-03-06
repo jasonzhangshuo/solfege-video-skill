@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+output/
+*.mp4
+*.html
+*.wav
+/tmp/
