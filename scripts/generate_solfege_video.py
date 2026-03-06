@@ -186,19 +186,66 @@ _SF2_SEARCH_PATHS = [
     '/opt/homebrew/share/fluid-synth/sf2/FluidR3_GM.sf2',
     '/usr/share/sounds/sf2/FluidR3_GM.sf2',
     '/usr/share/sounds/sf2/FluidR3_GS.sf2',
+    os.path.expanduser('~/Library/Audio/Sounds/Banks/FluidR3_GM.sf2'),
 ]
 
 def find_sf2() -> str | None:
-    """查找可用的 SF2 soundfont 文件。"""
+    """
+    查找可用的 SF2/SF3 soundfont 文件。
+    优先 FluidR3_GM（真实钢琴音色），跳过软链接（Homebrew 可能创建循环软链接）。
+    """
+    import glob as _glob
+
+    # ── 已知 FluidR3_GM 路径（优先）────────────────────────────────────────────
     for p in _SF2_SEARCH_PATHS:
-        if os.path.exists(p) and os.path.getsize(p) > 10_000_000:
+        if os.path.exists(p) and not os.path.islink(p) and os.path.getsize(p) > 10_000_000:
             return p
-    # 搜索 homebrew 目录下任意 sf2
-    brew_sf2_dir = '/opt/homebrew/share/fluid-synth/sf2'
-    if os.path.isdir(brew_sf2_dir):
-        for f in os.listdir(brew_sf2_dir):
-            if f.endswith('.sf2'):
-                return os.path.join(brew_sf2_dir, f)
+
+    # ── Homebrew Cellar 扫描（跳过软链接）──────────────────────────────────────
+    for cellar_base in ['/opt/homebrew/Cellar/fluid-synth', '/usr/local/Cellar/fluid-synth']:
+        if not os.path.isdir(cellar_base):
+            continue
+        sf2_files = _glob.glob(os.path.join(cellar_base, '*', 'share', '**', '*.sf2'),
+                               recursive=True)
+        # FluidR3 优先
+        for p in sorted(sf2_files):
+            if 'FluidR3' in os.path.basename(p) and not os.path.islink(p):
+                try:
+                    if os.path.getsize(p) > 10_000_000:
+                        return p
+                except OSError:
+                    pass
+        # 任意非链接 sf2
+        for p in sorted(sf2_files):
+            if not os.path.islink(p):
+                try:
+                    if os.path.getsize(p) > 10_000_000:
+                        return p
+                except OSError:
+                    pass
+        # sf3 fallback
+        for p in sorted(_glob.glob(os.path.join(cellar_base, '*', 'share', '**', '*.sf3'),
+                                   recursive=True)):
+            if not os.path.islink(p):
+                try:
+                    if os.path.getsize(p) > 1_000_000:
+                        print(f'  ⚠️  使用 SF3 音色库：{os.path.basename(p)}（建议改用 FluidR3_GM.sf2）',
+                              file=sys.stderr)
+                        return p
+                except OSError:
+                    pass
+
+    # ── /opt/homebrew/share 目录扫描（跳过软链接）──────────────────────────────
+    for brew_dir in ['/opt/homebrew/share/fluid-synth/sf2', '/usr/local/share/fluid-synth/sf2']:
+        if os.path.isdir(brew_dir):
+            for f in os.listdir(brew_dir):
+                p = os.path.join(brew_dir, f)
+                if f.endswith('.sf2') and not os.path.islink(p):
+                    try:
+                        if os.path.getsize(p) > 10_000_000:
+                            return p
+                    except OSError:
+                        pass
     return None
 
 

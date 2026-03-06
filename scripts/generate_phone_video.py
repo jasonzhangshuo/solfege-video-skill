@@ -26,6 +26,195 @@ DEVICE_SCALE = 2                     # deviceScaleFactor
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# 兜底音频生成（当 HTML 采样提取失败时使用）
+# ────────────────────────────────────────────────────────────────────────────
+
+def _find_sf2():
+    """
+    查找可用的 SF2/SF3 音色库。
+    优先级：
+      1. FluidR3_GM.sf2（标准钢琴音色，真实文件）
+      2. Homebrew Cellar 目录下任意真实 .sf2（非软链接）
+      3. Homebrew Cellar 目录下任意真实 .sf3（非软链接，非钢琴音色，品质可能不同）
+    注意：跳过软链接文件（Homebrew 有时会创建指向自身的循环软链接）。
+    """
+    import glob
+
+    # ── 第一优先级：已知 FluidR3_GM 路径（真实钢琴音色）────────────────────────
+    fluidr3_candidates = [
+        os.path.expanduser('~/.cache/solfege_soundfonts/FluidR3_GM.sf2'),
+        '/opt/homebrew/share/fluid-synth/sf2/FluidR3_GM.sf2',
+        '/usr/share/sounds/sf2/FluidR3_GM.sf2',
+        '/usr/share/sounds/sf2/FluidR3_GS.sf2',
+        os.path.expanduser('~/Library/Audio/Sounds/Banks/FluidR3_GM.sf2'),
+        '/usr/local/share/sounds/sf2/FluidR3_GM.sf2',
+    ]
+    for c in fluidr3_candidates:
+        if os.path.exists(c) and not os.path.islink(c) and os.path.getsize(c) > 10_000_000:
+            return c
+
+    # ── 第二优先级：Homebrew Cellar 真实目录扫描（跳过软链接）──────────────────
+    for cellar_base in ['/opt/homebrew/Cellar/fluid-synth', '/usr/local/Cellar/fluid-synth']:
+        if not os.path.isdir(cellar_base):
+            continue
+        # 扫描所有版本目录下的 sf2 文件，优先 FluidR3_GM 名称
+        sf2_files = glob.glob(os.path.join(cellar_base, '*', 'share', '**', '*.sf2'),
+                              recursive=True)
+        # FluidR3 优先
+        for p in sorted(sf2_files):
+            if 'FluidR3' in os.path.basename(p) and not os.path.islink(p):
+                try:
+                    if os.path.getsize(p) > 10_000_000:
+                        return p
+                except OSError:
+                    pass
+        # 其次任意真实 sf2（非软链接）
+        for p in sorted(sf2_files):
+            if not os.path.islink(p):
+                try:
+                    if os.path.getsize(p) > 10_000_000:
+                        print(f'  ⚠ 使用非标准音色库：{os.path.basename(p)}（钢琴效果可能不理想）'
+                              f'\n    建议下载 FluidR3_GM.sf2：'
+                              f'https://keymusician01.s3.amazonaws.com/FluidR3_GM.zip'
+                              f'\n    放到 ~/.cache/solfege_soundfonts/ 即可', file=sys.stderr)
+                        return p
+                except OSError:
+                    pass
+        # 最后 sf3（Homebrew 常见）
+        sf3_files = glob.glob(os.path.join(cellar_base, '*', 'share', '**', '*.sf3'),
+                              recursive=True)
+        for p in sorted(sf3_files):
+            if not os.path.islink(p):
+                try:
+                    if os.path.getsize(p) > 1_000_000:
+                        print(f'  ⚠ 使用 SF3 音色库：{os.path.basename(p)}（可能不是钢琴音色，声音会与预期不同）'
+                              f'\n    建议下载 FluidR3_GM.sf2：'
+                              f'https://keymusician01.s3.amazonaws.com/FluidR3_GM.zip'
+                              f'\n    放到 ~/.cache/solfege_soundfonts/ 即可', file=sys.stderr)
+                        return p
+                except OSError:
+                    pass
+
+    # ── 第三优先级：/opt/homebrew/share 目录扫描（跳过软链接）──────────────────
+    for brew_dir in ['/opt/homebrew/share/fluid-synth/sf2', '/usr/local/share/fluid-synth/sf2']:
+        if os.path.isdir(brew_dir):
+            for f in os.listdir(brew_dir):
+                p = os.path.join(brew_dir, f)
+                if f.endswith('.sf2') and not os.path.islink(p):
+                    try:
+                        if os.path.getsize(p) > 10_000_000:
+                            return p
+                    except OSError:
+                        pass
+    return None
+
+
+def _render_fluidsynth_direct(notes, bpm, wav_path, sf2, sr=44100):
+    """用 FluidSynth + mido 直接从音符 MIDI 值生成 WAV。"""
+    try:
+        import mido
+    except ImportError:
+        raise RuntimeError('缺少 mido 包（pip install mido）')
+
+    tpb = 480
+    tempo = int(60_000_000 / bpm)
+    mid = mido.MidiFile(type=0, ticks_per_beat=tpb)
+    track = mido.MidiTrack()
+    mid.tracks.append(track)
+    track.append(mido.MetaMessage('set_tempo', tempo=tempo, time=0))
+    track.append(mido.Message('program_change', channel=0, program=0, time=0))
+
+    for n in notes:
+        dur_ticks = max(1, int(n['beats'] * tpb))
+        midi = n.get('midi', -1)
+        if midi > 0:
+            track.append(mido.Message('note_on',  channel=0, note=int(midi), velocity=85, time=0))
+            track.append(mido.Message('note_off', channel=0, note=int(midi), velocity=0,  time=dur_ticks))
+        else:
+            # 休止符：静音占位
+            track.append(mido.Message('note_on',  channel=0, note=60, velocity=0, time=0))
+            track.append(mido.Message('note_off', channel=0, note=60, velocity=0, time=dur_ticks))
+
+    track.append(mido.MetaMessage('end_of_track', time=0))
+
+    with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as mf:
+        mid_path = mf.name
+    try:
+        mid.save(mid_path)
+        fs_bin = shutil.which('fluidsynth') or '/opt/homebrew/bin/fluidsynth'
+        r = subprocess.run(
+            [fs_bin, '-F', wav_path, '-r', str(sr), sf2, mid_path],
+            capture_output=True, timeout=60,
+        )
+        if r.returncode != 0 or not os.path.exists(wav_path):
+            raise RuntimeError(f'fluidsynth 失败: {r.stderr.decode()[-300:]}')
+    finally:
+        try:
+            os.unlink(mid_path)
+        except OSError:
+            pass
+
+
+def _render_sine_wave(notes, bpm, wav_path, sr=44100):
+    """正弦波兜底：所有依赖都不可用时用纯 Python 合成音频。"""
+    import numpy as np
+    from scipy.io import wavfile as _wf
+
+    beat_sec = 60.0 / bpm
+    chunks = []
+    for n in notes:
+        dur = max(0.05, n['beats'] * beat_sec)
+        midi = n.get('midi', -1)
+        if midi > 0:
+            freq = 440.0 * (2 ** ((int(midi) - 69) / 12))
+            t = np.linspace(0, dur, int(sr * dur), endpoint=False)
+            wave = (np.sin(2 * np.pi * freq * t) * 0.6).astype(np.float32)
+            fade = min(int(0.02 * sr), len(wave) // 4)
+            if fade > 0:
+                wave[:fade]  *= np.linspace(0, 1, fade, dtype=np.float32)
+                wave[-fade:] *= np.linspace(1, 0, fade, dtype=np.float32)
+            chunks.append(wave)
+        else:
+            chunks.append(np.zeros(int(sr * dur), dtype=np.float32))
+
+    audio = np.concatenate(chunks) if chunks else np.zeros(sr, dtype=np.float32)
+    # 余音尾部
+    audio = np.concatenate([audio, np.zeros(int(sr * 1.5), dtype=np.float32)])
+    peak = np.max(np.abs(audio))
+    if peak > 0:
+        audio = audio / peak * 0.85
+    _wf.write(wav_path, sr, (audio * 32767).astype(np.int16))
+
+
+def _fallback_render_audio(notes, bpm, wav_path, sr=44100):
+    """
+    HTML 采样提取失败时的兜底音频生成。
+    优先 FluidSynth 直接渲染；FluidSynth 不可用则退回正弦波。
+    """
+    sf2 = _find_sf2()
+    fs_available = bool(shutil.which('fluidsynth') or
+                        os.path.exists('/opt/homebrew/bin/fluidsynth'))
+
+    if sf2 and fs_available:
+        try:
+            print('  🎹 FluidSynth 兜底渲染音频 ...', end='', flush=True)
+            _render_fluidsynth_direct(notes, bpm, wav_path, sf2, sr)
+            print(' ✅')
+            return
+        except Exception as e:
+            print(f'\n  ⚠ FluidSynth 兜底失败 ({e})，改用正弦波', file=sys.stderr)
+    else:
+        if not sf2:
+            print('  ⚠ 未找到 SF2 音色库，使用正弦波合成音频', file=sys.stderr)
+        else:
+            print('  ⚠ 未找到 fluidsynth 命令，使用正弦波合成音频', file=sys.stderr)
+
+    print('  🔊 正弦波合成音频 ...', end='', flush=True)
+    _render_sine_wave(notes, bpm, wav_path, sr)
+    print(' ✅')
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # 步骤 1：生成 HTML（若未提供）
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -292,6 +481,9 @@ def render_audio_from_samples(html_path, notes, bpm, wav_path, sr=44100):
             mix[start:end] += arr[:end - start]
         cursor_sec += dur_sec
 
+    if not decoded:
+        raise ValueError(f'所有 {len(samples_b64)} 个采样 MP3 解码均失败，decoded 为空')
+
     # 归一化防爆音
     peak = np.max(np.abs(mix))
     if peak > 0.95:
@@ -389,9 +581,14 @@ def generate_video(
                      os.path.join(os.path.dirname(output), 'frames')
         frame_list = screenshot_notes(html_path, notes, bpm, frames_dir, scroll_frames)
 
-        # ── 4. 从 HTML 提取采样重建音频（与 HTML 播放器完全一致）──
+        # ── 4. 生成音频（优先从 HTML 内嵌采样重建；失败则兜底）──
         wav_path = os.path.join(tmpdir, 'audio.wav')
-        render_audio_from_samples(html_path, notes, bpm, wav_path)
+        try:
+            render_audio_from_samples(html_path, notes, bpm, wav_path)
+        except Exception as e:
+            print(f'  ⚠ HTML 采样提取失败（{e}）', file=sys.stderr)
+            print('  → 切换到兜底音频生成（FluidSynth / 正弦波）...', flush=True)
+            _fallback_render_audio(notes, bpm, wav_path)
 
         # ── 5. 合成视频 ──
         print(f'🎬 合成 {VIDEO_W}×{VIDEO_H} 视频 ...')

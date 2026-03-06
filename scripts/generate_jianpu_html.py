@@ -126,16 +126,60 @@ def render_note_samples(notes, key, sf2_path=None):
     返回 {midi_note: 'base64_mp3', ...}
     """
     if sf2_path is None:
-        candidates = [
+        # 与 generate_phone_video._find_sf2() 保持一致：优先 FluidR3_GM，跳过软链接
+        import glob as _glob
+        # 已知固定路径（真实 FluidR3_GM）
+        for c in [
             os.path.expanduser('~/.cache/solfege_soundfonts/FluidR3_GM.sf2'),
             '/opt/homebrew/share/fluid-synth/sf2/FluidR3_GM.sf2',
-        ]
-        for c in candidates:
-            if os.path.exists(c):
+            '/usr/share/sounds/sf2/FluidR3_GM.sf2',
+            '/usr/share/sounds/sf2/FluidR3_GS.sf2',
+            os.path.expanduser('~/Library/Audio/Sounds/Banks/FluidR3_GM.sf2'),
+        ]:
+            if os.path.exists(c) and not os.path.islink(c) and os.path.getsize(c) > 10_000_000:
                 sf2_path = c
                 break
+        # Homebrew Cellar 扫描（跳过软链接，优先 FluidR3 名称）
+        if sf2_path is None:
+            for cellar_base in ['/opt/homebrew/Cellar/fluid-synth', '/usr/local/Cellar/fluid-synth']:
+                if not os.path.isdir(cellar_base):
+                    continue
+                all_sf = _glob.glob(os.path.join(cellar_base, '*', 'share', '**', '*.sf2'),
+                                    recursive=True)
+                for p in sorted(all_sf):
+                    if 'FluidR3' in os.path.basename(p) and not os.path.islink(p):
+                        try:
+                            if os.path.getsize(p) > 10_000_000:
+                                sf2_path = p; break
+                        except OSError:
+                            pass
+                if sf2_path:
+                    break
+                # 任意非链接 sf2
+                for p in sorted(all_sf):
+                    if not os.path.islink(p):
+                        try:
+                            if os.path.getsize(p) > 10_000_000:
+                                sf2_path = p; break
+                        except OSError:
+                            pass
+                if sf2_path:
+                    break
+                # sf3 fallback
+                for p in sorted(_glob.glob(os.path.join(cellar_base, '*', 'share', '**', '*.sf3'),
+                                           recursive=True)):
+                    if not os.path.islink(p):
+                        try:
+                            if os.path.getsize(p) > 1_000_000:
+                                sf2_path = p; break
+                        except OSError:
+                            pass
+                if sf2_path:
+                    break
     if sf2_path is None:
-        print('  ⚠ 未找到 SF2 soundfont，将使用 Web Audio 合成', file=sys.stderr)
+        print('  ⚠ 未找到 SF2 soundfont，HTML 将使用 Web Audio 合成（视频生成时会自动兜底）', file=sys.stderr)
+        print('    建议下载 FluidR3_GM.sf2 → https://keymusician01.s3.amazonaws.com/FluidR3_GM.zip'
+              '\n    解压后放到 ~/.cache/solfege_soundfonts/', file=sys.stderr)
         return {}
 
     unique_midis = sorted(set(
